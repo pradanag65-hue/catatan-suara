@@ -133,9 +133,6 @@ main{padding-bottom:130px}
     <h2 class="lbl">Catatan baru</h2>
     <textarea id="draft" placeholder="Ketik catatan, atau tekan Rekam dan mulai bicara"></textarea>
     <input type="text" id="tagIn" placeholder="Label, mis. rapat, ide (pisahkan dengan koma)">
-    <h2 class="lbl" style="margin:16px 0 8px">Pembicara aktif</h2>
-    <div id="spk"></div>
-    <div class="row"><button id="spkAdd">+ Tambah</button><button id="spkRen">Ubah nama</button></div>
     <div class="row m">
       <button id="mic"><span class="dot"></span><span id="miclbl">Rekam</span></button>
       <span class="wave" id="wave"><i></i><i></i><i></i><i></i><i></i><i></i></span>
@@ -257,7 +254,7 @@ function renderList() {
   items.forEach(n => {
     const d = mk("div", "note" + (n.pin ? " pin" : ""));
     const m = mk("div", "meta");
-    if (n.spk) m.append(mk("span", "spk", n.spk + "  ")); m.append(mk("span", "", (n.voice ? "Suara" : "Ketik") + " · " + fmt(n.at)), mk("span", "sp"));
+    m.append(mk("span", "", (n.voice ? "Suara" : "Ketik") + " · " + fmt(n.at)), mk("span", "sp"));
     const btn = (t, title, fn) => { const b = mk("button", "mini", t); b.title = title; b.onclick = fn; return b; };
     m.append(
       btn(n.pin ? "Lepas" : "Sematkan", "Sematkan", () => { n.pin = !n.pin; save(); renderList(); }),
@@ -269,12 +266,11 @@ function renderList() {
     if (editing === n.id) {
       const t = mk("textarea"); t.value = n.text; t.style.marginTop = "8px";
       const ti = mk("input"); ti.type = "text"; ti.placeholder = "Label (pisahkan dengan koma)"; ti.value = (n.tags || []).join(", "); ti.style.cssText = "width:100%;margin-top:8px";
-      const sel = mk("select"); sel.style.marginTop = "8px"; ["", ...(c.speakers || [])].forEach(nm => { const o = mk("option", "", nm || "(tanpa pembicara)"); o.value = nm; sel.appendChild(o); }); sel.value = n.spk || "";
       const r = mk("div", "row");
       const ok = mk("button", "pri", "Simpan"), no = mk("button", "", "Batal");
-      ok.onclick = () => { const v = t.value.trim(); if (v) n.text = v; n.tags = parseTags(ti.value); n.spk = sel.value; editing = null; save(); renderAll(); };
+      ok.onclick = () => { const v = t.value.trim(); if (v) n.text = v; n.tags = parseTags(ti.value); editing = null; save(); renderAll(); };
       no.onclick = () => { editing = null; renderList(); };
-      r.append(ok, no); d.append(t, ti, sel, r);
+      r.append(ok, no); d.append(t, ti, r);
     } else {
       d.appendChild(mk("p", "", n.text));
       (n.tags || []).forEach(g => { const b = mk("button", "tg", "#" + g); b.onclick = () => { tagF = g; renderList(); }; d.appendChild(b); });
@@ -294,7 +290,7 @@ function renderModes() {
     b.onclick = () => { S.mode = k; save(); renderModes(); }; m.appendChild(b);
   });
 }
-function renderAll() { renderSess(); $("ttl").value = cur().title; renderStats(); renderList(); renderSum(); renderModes(); renderInfo(); renderPhotos(); renderSpk(); }
+function renderAll() { renderSess(); $("ttl").value = cur().title; renderStats(); renderList(); renderSum(); renderModes(); renderInfo(); renderPhotos(); }
 
 $("sessSel").onchange = e => { S.cur = e.target.value; save(); renderAll(); };
 $("newSess").onclick = () => {
@@ -325,6 +321,7 @@ $("draft").onkeydown = e => { if ((e.ctrlKey || e.metaKey) && e.key === "Enter")
 // --- Suara: rapat panjang, terus merekam sampai ditekan Berhenti ---
 let listening = false, base = "", timer = null, t0 = 0, want = false, rec = null, recOn = false, wl = null, restartT = null, errN = 0;
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+const MOBILE = /Android|iPhone|iPad/i.test(navigator.userAgent);
 const pad2 = n => String(n).padStart(2, "0");
 function tick() { const sc = Math.floor((Date.now() - t0) / 1000); $("tm").textContent = pad2(Math.floor(sc / 3600)) + ":" + pad2(Math.floor(sc / 60) % 60) + ":" + pad2(sc % 60); }
 function setMic(on) {
@@ -333,22 +330,30 @@ function setMic(on) {
   clearInterval(timer);
   if (on) { t0 = Date.now(); tick(); timer = setInterval(tick, 1000); } else { $("tm").textContent = ""; t0 = 0; }
 }
-const showLive = t => { const c = cur(), sp = (c.speakers || [])[c.curSpk || 0]; $("live").textContent = t ? (sp ? sp + ": " : "") + t : ""; };
+const showLive = t => { $("live").textContent = t || ""; };
+let lastSeg = "", lastSegAt = 0;
 function commit(text) {
-  const t = text.trim(); if (!t) return;
-  const c = cur(), sp = (c.speakers || [])[c.curSpk || 0] || "", now = Date.now(), last = c.notes[c.notes.length - 1];
-  if (last && last.voice && (last.spk || "") === sp && now - (last.la || last.at) < 25000 && last.text.length < 700) { last.text += " " + t; last.la = now; }
-  else c.notes.push({ id: uid(), text: t, at: now, la: now, voice: true, pin: false, tags: [], spk: sp });
-  save(); renderStats(); if (editing === null) renderList();
+  const t = text.trim().replace(/\s+/g, " "); if (!t) return;
+  const now = Date.now(), c = cur(), last = c.notes[c.notes.length - 1];
+  const ok = last && last.voice && last.text.length < 700 && now - (last.la || last.at) < 25000;
+  const ln = t.toLowerCase(), pl = lastSeg.toLowerCase(), done = () => { save(); renderStats(); if (editing === null) renderList(); };
+  if (pl && now - lastSegAt < 15000 && (t.split(" ").length >= 3 || lastSeg.split(" ").length >= 3)) {
+    if (ln === pl || pl.startsWith(ln)) return; // kalimat sama diulang (bug pengenal suara Android)
+    if (ln.startsWith(pl) && ok && last.text.toLowerCase().endsWith(pl)) { // versi lebih lengkap dari kalimat sama: timpa, jangan ditambah
+      last.text = last.text.slice(0, last.text.length - lastSeg.length) + t; last.la = now; lastSeg = t; lastSegAt = now; done(); return;
+    }
+  }
+  if (ok) { last.text += " " + t; last.la = now; } else c.notes.push({ id: uid(), text: t, at: now, la: now, voice: true, pin: false, tags: [] });
+  lastSeg = t; lastSegAt = now; done();
 }
 function mkRec() {
-  const r = new SR(); r.lang = "id-ID"; r.continuous = true; r.interimResults = true; r.maxAlternatives = 1;
+  let seen = 0; const r = new SR(); r.lang = "id-ID"; r.continuous = !MOBILE; r.interimResults = true; r.maxAlternatives = 1;
   r.onstart = () => { recOn = true; };
   r.onresult = ev => {
     let part = "";
     for (let i = ev.resultIndex; i < ev.results.length; i++) {
       const res = ev.results[i];
-      if (res.isFinal) { errN = 0; if (/mencoba lagi/.test($("hint").textContent)) $("hint").textContent = ""; commit(res[0].transcript); } else part += res[0].transcript;
+      if (res.isFinal) { if (i >= seen) { seen = i + 1; errN = 0; if (/mencoba lagi/.test($("hint").textContent)) $("hint").textContent = ""; commit(res[0].transcript); } } else part += res[0].transcript;
     }
     showLive(part);
   };
@@ -382,19 +387,6 @@ $("mic").onclick = () => {
   $("hint").textContent = "Merekam\u2026 berjalan terus sampai Anda menekan Berhenti rekam. Biarkan layar menyala dan aplikasi tetap di depan.";
 };
 
-// --- Pembicara ---
-function spkInit(c) { if (!c.speakers || !c.speakers.length) c.speakers = ["Pembicara 1", "Pembicara 2", "Pembicara 3"]; if (c.curSpk == null) c.curSpk = 0; }
-function renderSpk() {
-  const c = cur(); spkInit(c); const box = $("spk"); box.textContent = "";
-  c.speakers.forEach((nm, i) => { const bt = mk("button", "sp-b" + (i === c.curSpk ? " on" : ""), nm); bt.onclick = () => { c.curSpk = i; renderSpk(); showLive(""); }; box.appendChild(bt); });
-}
-$("spkAdd").onclick = () => { const c = cur(); spkInit(c); c.speakers.push("Pembicara " + (c.speakers.length + 1)); c.curSpk = c.speakers.length - 1; save(); renderSpk(); };
-$("spkRen").onclick = () => {
-  const c = cur(); spkInit(c); const old = c.speakers[c.curSpk];
-  const nn = (prompt("Nama pembicara:", old) || "").trim(); if (!nn || nn === old) return;
-  c.notes.forEach(n => { if (n.spk === old) n.spk = nn; }); c.speakers[c.curSpk] = nn; save(); renderSpk(); renderList();
-};
-
 // --- Ringkasan ---
 let ctrl = null;
 $("fin").onclick = async () => {
@@ -406,7 +398,7 @@ $("fin").onclick = async () => {
   const b = $("fin"); b.disabled = true;
   const sample = async (pr, o) => { o.onText({ text: await api("summarize", { prompt: pr }) }); };
   if (ctrl) ctrl.abort(); ctrl = new AbortController();
-  let data = c.notes.slice().sort((a, b) => a.at - b.at).map((n, i) => (i + 1) + ". [" + fmt(n.at) + "]" + (n.spk ? " " + n.spk + ":" : "") + (n.pin ? " (PENTING)" : "") + ((n.tags || []).length ? " {label: " + n.tags.join(", ") + "}" : "") + " " + n.text).join("\n");
+  let data = c.notes.slice().sort((a, b) => a.at - b.at).map((n, i) => (i + 1) + ". [" + fmt(n.at) + "]" + (n.pin ? " (PENTING)" : "") + ((n.tags || []).length ? " {label: " + n.tags.join(", ") + "}" : "") + " " + n.text).join("\n");
   if (data.length > 40000) {
     try {
       const parts = []; let acc = "";
@@ -417,7 +409,7 @@ $("fin").onclick = async () => {
       data = sums.join("\n\n");
     } catch (e) { out.textContent = "Gagal meringkas: " + (e && e.message ? e.message : "coba lagi"); b.disabled = false; return; }
   }
-  const prompt = "Judul sesi: " + c.title + "\nBerikut catatan (hasil ketikan dan transkripsi suara, mungkin ada salah dengar). Tulis dalam Bahasa Indonesia, teks biasa tanpa markdown tebal/heading, ringkas dan jelas. Catatan bertanda PENTING diberi bobot lebih. Bila ada nama pembicara sebelum isi catatan, sebutkan siapa yang menyampaikan setiap pokok pembahasan.\n\nFormat:\n" + PROMPTS[S.mode] + "\n\nCATATAN:\n" + data;
+  const prompt = "Judul sesi: " + c.title + "\nBerikut catatan (hasil ketikan dan transkripsi suara, mungkin ada salah dengar). Tulis dalam Bahasa Indonesia, teks biasa tanpa markdown tebal/heading, ringkas dan jelas. Catatan bertanda PENTING diberi bobot lebih.\n\nFormat:\n" + PROMPTS[S.mode] + "\n\nCATATAN:\n" + data;
   try {
     await sample(prompt, { signal: ctrl.signal, onText: ({ text }) => { out.textContent = text; c.summary = text; } }); c.summaryMode = S.mode; c.sumN = c.notes.length;
     save();
