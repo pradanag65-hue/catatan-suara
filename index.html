@@ -106,6 +106,11 @@ input.title{font-size:26px;min-height:0}
 nav{max-width:480px;margin:0 auto}
 nav button{min-height:52px;font-size:11.5px;border:0}
 main{padding-bottom:130px}
+#spk{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px}
+.sp-b{padding:8px 12px;min-height:40px}
+.sp-b.on{background:var(--ac);border-color:var(--ac);color:var(--onac);font-weight:600}
+.live{min-height:20px;margin-top:10px;font-size:14px;color:var(--mut);font-style:italic}
+.spk{font-weight:600;color:var(--ac)}
 .sync{display:block;font-size:11.5px;color:var(--mut);margin-top:2px}
 </style>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
@@ -128,12 +133,16 @@ main{padding-bottom:130px}
     <h2 class="lbl">Catatan baru</h2>
     <textarea id="draft" placeholder="Ketik catatan, atau tekan Rekam dan mulai bicara"></textarea>
     <input type="text" id="tagIn" placeholder="Label, mis. rapat, ide (pisahkan dengan koma)">
+    <h2 class="lbl" style="margin:16px 0 8px">Pembicara aktif</h2>
+    <div id="spk"></div>
+    <div class="row"><button id="spkAdd">+ Tambah</button><button id="spkRen">Ubah nama</button></div>
     <div class="row m">
       <button id="mic"><span class="dot"></span><span id="miclbl">Rekam</span></button>
       <span class="wave" id="wave"><i></i><i></i><i></i><i></i><i></i><i></i></span>
       <span id="tm"></span><span class="sp"></span>
       <button id="clr">Bersihkan</button><button id="add" class="pri">Tambah</button>
     </div>
+    <div id="live" class="live"></div>
   </div>
   <h2 class="lbl">Daftar catatan</h2>
   <div class="tools"><input type="search" id="q" placeholder="Cari catatan"><button id="pinOnly">Disematkan</button></div>
@@ -248,7 +257,7 @@ function renderList() {
   items.forEach(n => {
     const d = mk("div", "note" + (n.pin ? " pin" : ""));
     const m = mk("div", "meta");
-    m.append(mk("span", "", (n.voice ? "🎙️ " : "⌨️ ") + fmt(n.at)), mk("span", "sp"));
+    if (n.spk) m.append(mk("span", "spk", n.spk + "  ")); m.append(mk("span", "", (n.voice ? "Suara" : "Ketik") + " · " + fmt(n.at)), mk("span", "sp"));
     const btn = (t, title, fn) => { const b = mk("button", "mini", t); b.title = title; b.onclick = fn; return b; };
     m.append(
       btn(n.pin ? "Lepas" : "Sematkan", "Sematkan", () => { n.pin = !n.pin; save(); renderList(); }),
@@ -260,11 +269,12 @@ function renderList() {
     if (editing === n.id) {
       const t = mk("textarea"); t.value = n.text; t.style.marginTop = "8px";
       const ti = mk("input"); ti.type = "text"; ti.placeholder = "Label (pisahkan dengan koma)"; ti.value = (n.tags || []).join(", "); ti.style.cssText = "width:100%;margin-top:8px";
+      const sel = mk("select"); sel.style.marginTop = "8px"; ["", ...(c.speakers || [])].forEach(nm => { const o = mk("option", "", nm || "(tanpa pembicara)"); o.value = nm; sel.appendChild(o); }); sel.value = n.spk || "";
       const r = mk("div", "row");
       const ok = mk("button", "pri", "Simpan"), no = mk("button", "", "Batal");
-      ok.onclick = () => { const v = t.value.trim(); if (v) n.text = v; n.tags = parseTags(ti.value); editing = null; save(); renderAll(); };
+      ok.onclick = () => { const v = t.value.trim(); if (v) n.text = v; n.tags = parseTags(ti.value); n.spk = sel.value; editing = null; save(); renderAll(); };
       no.onclick = () => { editing = null; renderList(); };
-      r.append(ok, no); d.append(t, ti, r);
+      r.append(ok, no); d.append(t, ti, sel, r);
     } else {
       d.appendChild(mk("p", "", n.text));
       (n.tags || []).forEach(g => { const b = mk("button", "tg", "#" + g); b.onclick = () => { tagF = g; renderList(); }; d.appendChild(b); });
@@ -284,7 +294,7 @@ function renderModes() {
     b.onclick = () => { S.mode = k; save(); renderModes(); }; m.appendChild(b);
   });
 }
-function renderAll() { renderSess(); $("ttl").value = cur().title; renderStats(); renderList(); renderSum(); renderModes(); renderInfo(); renderPhotos(); }
+function renderAll() { renderSess(); $("ttl").value = cur().title; renderStats(); renderList(); renderSum(); renderModes(); renderInfo(); renderPhotos(); renderSpk(); }
 
 $("sessSel").onchange = e => { S.cur = e.target.value; save(); renderAll(); };
 $("newSess").onclick = () => {
@@ -312,46 +322,77 @@ $("add").onclick = addNote;
 $("clr").onclick = () => { $("draft").value = ""; base = ""; usedVoice = false; };
 $("draft").onkeydown = e => { if ((e.ctrlKey || e.metaKey) && e.key === "Enter") addNote(); };
 
-// --- Suara ---
-let dict = null, listening = false, base = "", timer = null, t0 = 0;
+// --- Suara: rapat panjang, terus merekam sampai ditekan Berhenti ---
+let listening = false, base = "", timer = null, t0 = 0, want = false, rec = null, recOn = false, wl = null, restartT = null, errN = 0;
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+const pad2 = n => String(n).padStart(2, "0");
+function tick() { const sc = Math.floor((Date.now() - t0) / 1000); $("tm").textContent = pad2(Math.floor(sc / 3600)) + ":" + pad2(Math.floor(sc / 60) % 60) + ":" + pad2(sc % 60); }
 function setMic(on) {
   listening = on; $("mic").classList.toggle("on", on); $("wave").classList.toggle("show", on);
-  $("miclbl").textContent = on ? "Berhenti" : "Rekam";
-  if (on) $("hint").textContent = "Mendengarkan… ucapan otomatis ditulis dan disimpan sebagai catatan saat Anda menekan Berhenti.";
-  else if ($("hint").textContent.startsWith("Mendengarkan")) $("hint").textContent = "";
+  $("miclbl").textContent = on ? "Berhenti rekam" : "Rekam";
   clearInterval(timer);
-  if (on) { t0 = Date.now(); timer = setInterval(() => { const s = Math.floor((Date.now() - t0) / 1000); $("tm").textContent = String(Math.floor(s / 60)).padStart(2, "0") + ":" + String(s % 60).padStart(2, "0"); }, 500); }
-  else $("tm").textContent = "";
+  if (on) { t0 = Date.now(); tick(); timer = setInterval(tick, 1000); } else { $("tm").textContent = ""; t0 = 0; }
 }
-(async () => {
-  dict = null;
-  const auto = () => setTimeout(() => { if (!listening && usedVoice && $("draft").value.trim()) addNote(); }, 700);
-  if (!dict) {
-    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SR) { $("mic").disabled = true; $("hint").textContent = "Perekam suara tidak tersedia di browser ini. Anda tetap bisa mengetik catatan."; return; }
-    const r = new SR(); r.lang = "id-ID"; r.continuous = true; r.interimResults = true;
-    r.onresult = ev => {
-      let fin = "", part = "";
-      for (let i = ev.resultIndex; i < ev.results.length; i++) { const t = ev.results[i][0].transcript; if (ev.results[i].isFinal) fin += t; else part += t; }
-      if (fin) { base = (base + " " + fin).trim(); usedVoice = true; }
-      $("draft").value = (base + " " + part).trim();
-    };
-    r.onstart = () => setMic(true);
-    r.onend = () => { setMic(false); auto(); };
-    r.onerror = ev => { $("hint").textContent = ev.error === "not-allowed" ? "Izin mikrofon ditolak. Anda masih bisa mengetik." : "Perekam suara bermasalah (" + ev.error + ")."; };
-    dict = { start: async () => r.start(), stop: async () => r.stop() };
-    return;
-  }
-  dict.onPartial(({ text }) => { $("draft").value = (base + " " + text).trim(); });
-  dict.onFinal(({ text }) => { base = (base + " " + text).trim(); $("draft").value = base; usedVoice = true; });
-  dict.onState(({ state }) => { const on = state === "listening"; setMic(on); if (!on) auto(); });
-})();
-$("mic").onclick = async () => {
-  if (!dict) return;
-  try {
-    if (listening) await dict.stop();
-    else { base = $("draft").value.trim(); dict.start().catch(err => { $("hint").textContent = err && err.code === "not_granted" ? "Izin mikrofon ditolak. Anda masih bisa mengetik." : "Tidak bisa mulai merekam."; }); }
-  } catch (e) { $("hint").textContent = "Tidak bisa merekam saat ini."; }
+const showLive = t => { const c = cur(), sp = (c.speakers || [])[c.curSpk || 0]; $("live").textContent = t ? (sp ? sp + ": " : "") + t : ""; };
+function commit(text) {
+  const t = text.trim(); if (!t) return;
+  const c = cur(), sp = (c.speakers || [])[c.curSpk || 0] || "", now = Date.now(), last = c.notes[c.notes.length - 1];
+  if (last && last.voice && (last.spk || "") === sp && now - (last.la || last.at) < 25000 && last.text.length < 700) { last.text += " " + t; last.la = now; }
+  else c.notes.push({ id: uid(), text: t, at: now, la: now, voice: true, pin: false, tags: [], spk: sp });
+  save(); renderStats(); if (editing === null) renderList();
+}
+function mkRec() {
+  const r = new SR(); r.lang = "id-ID"; r.continuous = true; r.interimResults = true; r.maxAlternatives = 1;
+  r.onstart = () => { recOn = true; };
+  r.onresult = ev => {
+    let part = "";
+    for (let i = ev.resultIndex; i < ev.results.length; i++) {
+      const res = ev.results[i];
+      if (res.isFinal) { errN = 0; if (/mencoba lagi/.test($("hint").textContent)) $("hint").textContent = ""; commit(res[0].transcript); } else part += res[0].transcript;
+    }
+    showLive(part);
+  };
+  r.onend = () => { recOn = false; showLive(""); if (want) { clearTimeout(restartT); restartT = setTimeout(startRec, Math.min(250 + errN * 700, 5000)); } };
+  r.onerror = ev => {
+    if (ev.error === "not-allowed" || ev.error === "service-not-allowed") { want = false; setMic(false); releaseLock(); $("hint").textContent = "Izin mikrofon ditolak. Izinkan mikrofon lalu coba lagi."; return; }
+    if (ev.error === "network") { errN++; $("hint").textContent = "Koneksi pengenal suara terputus, mencoba lagi\u2026"; }
+    else if (ev.error === "audio-capture") { errN++; $("hint").textContent = "Mikrofon tidak terdeteksi, mencoba lagi\u2026"; }
+  };
+  return r;
+}
+function startRec() {
+  if (!want || recOn) return;
+  try { rec = mkRec(); rec.start(); } catch (e) { errN++; clearTimeout(restartT); restartT = setTimeout(startRec, 1500); }
+}
+async function lockScreen() { try { if (navigator.wakeLock && want && !wl) { wl = await navigator.wakeLock.request("screen"); wl.onrelease = () => { wl = null; }; } } catch (e) {} }
+function releaseLock() { if (wl) { try { wl.release(); } catch (e) {} wl = null; } }
+function stopRec() {
+  want = false; clearTimeout(restartT); releaseLock(); showLive("");
+  try { rec && rec.stop(); } catch (e) {}
+  setMic(false); flush();
+}
+document.addEventListener("visibilitychange", () => { if (want && document.visibilityState === "visible") { lockScreen(); clearTimeout(restartT); startRec(); } });
+window.addEventListener("beforeunload", e => { if (want) { e.preventDefault(); e.returnValue = ""; } });
+let dict = SR ? { stop: async () => { if (want) stopRec(); } } : null;
+if (!SR) { $("mic").disabled = true; $("hint").textContent = "Perekam suara tidak tersedia di browser ini. Gunakan Chrome atau Edge (bukan iPhone). Anda tetap bisa mengetik."; }
+$("mic").onclick = () => {
+  if (!SR) return;
+  if (want) { stopRec(); $("hint").textContent = "Rekaman dihentikan. Semua catatan sudah tersimpan."; return; }
+  want = true; errN = 0; setMic(true); startRec(); lockScreen();
+  $("hint").textContent = "Merekam\u2026 berjalan terus sampai Anda menekan Berhenti rekam. Biarkan layar menyala dan aplikasi tetap di depan.";
+};
+
+// --- Pembicara ---
+function spkInit(c) { if (!c.speakers || !c.speakers.length) c.speakers = ["Pembicara 1", "Pembicara 2", "Pembicara 3"]; if (c.curSpk == null) c.curSpk = 0; }
+function renderSpk() {
+  const c = cur(); spkInit(c); const box = $("spk"); box.textContent = "";
+  c.speakers.forEach((nm, i) => { const bt = mk("button", "sp-b" + (i === c.curSpk ? " on" : ""), nm); bt.onclick = () => { c.curSpk = i; renderSpk(); showLive(""); }; box.appendChild(bt); });
+}
+$("spkAdd").onclick = () => { const c = cur(); spkInit(c); c.speakers.push("Pembicara " + (c.speakers.length + 1)); c.curSpk = c.speakers.length - 1; save(); renderSpk(); };
+$("spkRen").onclick = () => {
+  const c = cur(); spkInit(c); const old = c.speakers[c.curSpk];
+  const nn = (prompt("Nama pembicara:", old) || "").trim(); if (!nn || nn === old) return;
+  c.notes.forEach(n => { if (n.spk === old) n.spk = nn; }); c.speakers[c.curSpk] = nn; save(); renderSpk(); renderList();
 };
 
 // --- Ringkasan ---
@@ -365,8 +406,18 @@ $("fin").onclick = async () => {
   const b = $("fin"); b.disabled = true;
   const sample = async (pr, o) => { o.onText({ text: await api("summarize", { prompt: pr }) }); };
   if (ctrl) ctrl.abort(); ctrl = new AbortController();
-  const data = c.notes.slice().sort((a, b) => a.at - b.at).map((n, i) => (i + 1) + ". [" + fmt(n.at) + "]" + (n.pin ? " (PENTING)" : "") + ((n.tags || []).length ? " {label: " + n.tags.join(", ") + "}" : "") + " " + n.text).join("\n");
-  const prompt = "Judul sesi: " + c.title + "\nBerikut catatan (hasil ketikan dan transkripsi suara, mungkin ada salah dengar). Tulis dalam Bahasa Indonesia, teks biasa tanpa markdown tebal/heading, ringkas dan jelas. Catatan bertanda PENTING diberi bobot lebih.\n\nFormat:\n" + PROMPTS[S.mode] + "\n\nCATATAN:\n" + data;
+  let data = c.notes.slice().sort((a, b) => a.at - b.at).map((n, i) => (i + 1) + ". [" + fmt(n.at) + "]" + (n.spk ? " " + n.spk + ":" : "") + (n.pin ? " (PENTING)" : "") + ((n.tags || []).length ? " {label: " + n.tags.join(", ") + "}" : "") + " " + n.text).join("\n");
+  if (data.length > 40000) {
+    try {
+      const parts = []; let acc = "";
+      data.split("\n").forEach(l => { if (acc.length + l.length > 30000) { parts.push(acc); acc = ""; } acc += l + "\n"; });
+      if (acc) parts.push(acc);
+      const sums = [];
+      for (let i = 0; i < parts.length; i++) { out.textContent = "Meringkas bagian " + (i + 1) + " dari " + parts.length + "\u2026"; sums.push("BAGIAN " + (i + 1) + ":\n" + await api("summarize", { prompt: "Ringkas bagian rapat berikut secara padat (maksimal 400 kata) dalam Bahasa Indonesia. Pertahankan nama pembicara, pokok bahasan, keputusan, dan tugas.\n\n" + parts[i] })); }
+      data = sums.join("\n\n");
+    } catch (e) { out.textContent = "Gagal meringkas: " + (e && e.message ? e.message : "coba lagi"); b.disabled = false; return; }
+  }
+  const prompt = "Judul sesi: " + c.title + "\nBerikut catatan (hasil ketikan dan transkripsi suara, mungkin ada salah dengar). Tulis dalam Bahasa Indonesia, teks biasa tanpa markdown tebal/heading, ringkas dan jelas. Catatan bertanda PENTING diberi bobot lebih. Bila ada nama pembicara sebelum isi catatan, sebutkan siapa yang menyampaikan setiap pokok pembahasan.\n\nFormat:\n" + PROMPTS[S.mode] + "\n\nCATATAN:\n" + data;
   try {
     await sample(prompt, { signal: ctrl.signal, onText: ({ text }) => { out.textContent = text; c.summary = text; } }); c.summaryMode = S.mode; c.sumN = c.notes.length;
     save();
@@ -401,16 +452,16 @@ async function api(action, p = {}) {
   const r = await fetch(CFG.url, { method: "POST", body: JSON.stringify(Object.assign({ action, token: CFG.token }, p)) });
   const j = await r.json(); if (!j.ok) throw new Error(j.error || "gagal"); return j.data;
 }
-const sig = x => JSON.stringify([x.title, x.notes, x.info, x.summary, (x.photos || []).map(p => [p.id, p.cap])]);
+const sig = x => JSON.stringify([x.title, x.notes, x.info, x.summary, x.speakers, (x.photos || []).map(p => [p.id, p.cap])]);
 const baseSigs = () => S.sessions.forEach(x => { sigs[x.id] = sig(x); });
-const toRow = x => { const i = Object.assign({}, S.def, x.info); return { id: x.id, judul: x.title, dibuat: x.created, acara: i.acara || "", tgl: i.tgl || "", pukul: i.pukul || "", tempat: i.tempat || "", alamat: i.alamat || "", notulis: i.notulis || "", jabatan: i.jabatan || "", pengesah: i.pengesah || "", mode: x.summaryMode || "", ringkasan: x.summary || "", upd: x.upd || 0,
-  notes: x.notes.map(n => ({ id: n.id, teks: n.text, waktu: n.at, suara: n.voice ? 1 : 0, sematkan: n.pin ? 1 : 0, label: (n.tags || []).join(", ") })),
+const toRow = x => { const i = Object.assign({}, S.def, x.info); return { id: x.id, judul: x.title, dibuat: x.created, acara: i.acara || "", tgl: i.tgl || "", pukul: i.pukul || "", tempat: i.tempat || "", alamat: i.alamat || "", notulis: i.notulis || "", jabatan: i.jabatan || "", pengesah: i.pengesah || "", mode: x.summaryMode || "", ringkasan: x.summary || "", upd: x.upd || 0, peserta: (x.speakers || []).join("|"),
+  notes: x.notes.map(n => ({ id: n.id, teks: n.text, waktu: n.at, suara: n.voice ? 1 : 0, sematkan: n.pin ? 1 : 0, label: (n.tags || []).join(", "), pembicara: n.spk || "" })),
   photos: (x.photos || []).map(p => ({ id: p.id, ket: p.cap || "" })) }; };
-const fromRow = r => ({ id: String(r.id), title: String(r.judul), created: Number(r.dibuat), upd: Number(r.upd) || 0, summary: String(r.ringkasan || ""), summaryMode: String(r.mode || ""), sumN: (r.notes || []).length,
+const fromRow = r => ({ id: String(r.id), title: String(r.judul), created: Number(r.dibuat), upd: Number(r.upd) || 0, summary: String(r.ringkasan || ""), summaryMode: String(r.mode || ""), sumN: (r.notes || []).length, speakers: String(r.peserta || "").split("|").filter(Boolean), curSpk: 0,
   info: { acara: String(r.acara || ""), tgl: String(r.tgl || ""), pukul: String(r.pukul || ""), tempat: String(r.tempat || ""), alamat: String(r.alamat || ""), notulis: String(r.notulis || ""), jabatan: String(r.jabatan || ""), pengesah: String(r.pengesah || "") },
-  notes: (r.notes || []).map(n => ({ id: String(n.id), text: String(n.teks), at: Number(n.waktu), voice: !!Number(n.suara), pin: !!Number(n.sematkan), tags: String(n.label || "").split(",").map(t => t.trim()).filter(Boolean) })),
+  notes: (r.notes || []).map(n => ({ id: String(n.id), text: String(n.teks), at: Number(n.waktu), voice: !!Number(n.suara), pin: !!Number(n.sematkan), tags: String(n.label || "").split(",").map(t => t.trim()).filter(Boolean), spk: String(n.pembicara || ""), la: Number(n.waktu) })),
   photos: (r.photos || []).map(p => ({ id: String(p.id), fid: p.file_id, w: Number(p.w), h: Number(p.h), at: Number(p.waktu), cap: String(p.keterangan || ""), up: true })) });
-function touch(c) { c.upd = Date.now(); dirty.add(c.id); setSt("Menyimpan ke Sheet\u2026"); clearTimeout(syncT); syncT = setTimeout(flush, 1500); }
+function touch(c) { c.upd = Date.now(); dirty.add(c.id); setSt("Menyimpan ke Sheet\u2026"); clearTimeout(syncT); syncT = setTimeout(flush, listening ? 45000 : 1500); }
 async function flush() {
   if (syncing || !dirty.size) return; syncing = true;
   const ids = [...dirty]; dirty.clear();
